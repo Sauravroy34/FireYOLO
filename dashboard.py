@@ -387,7 +387,7 @@ def build_dashboard():
         # Log fire detections (deduplicate by only logging transitions)
         if video_stream.fire_detected:
             ts = datetime.now().strftime("%H:%M:%S")
-            entry = f"🔥 **{ts}** — Fire detected! (#{video_stream.detection_count})"
+            entry = f"**{ts}** — Fire detected! (#{video_stream.detection_count})"
             if not detection_entries or detection_entries[-1] != entry:
                 detection_entries.append(entry)
                 # keep last 20 entries
