@@ -34,12 +34,14 @@ SENSOR_FIELDS = ["temperature", "humidity"]
 CHART_ROLLOVER = 200          # max data-points kept per sensor chart
 VIDEO_CALLBACK_MS = 120       # ~8 FPS target for annotated video
 SENSOR_CALLBACK_MS = 500      # poll new sensor readings every 500ms
+FIRE_ALERT_CALLBACK_MS = 200  # push fire-state to ESP32 this often (ms)
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 640
 
 # ──────────────────────────────────────────────────────────────────────
 # Panel extensions
 # ──────────────────────────────────────────────────────────────────────
+
 pn.extension(sizing_mode="stretch_width", notifications=True)
 
 
@@ -132,8 +134,7 @@ class VideoStream:
                         with self._lock:
                             self._latest_jpg = buf.tobytes()
                             self._fire_detected = fire_now
-                            if fire_now:
-                                self._detection_count += 1
+
 
             except Exception as exc:
                 print(f"[VideoStream] Error: {exc}")
@@ -161,6 +162,8 @@ class SensorReceiver:
         self._running = False
         self._thread: threading.Thread | None = None
         self._receiving = False
+        self._last_addr: tuple | None = None   # (ip, port) of the Arduino
+        self._sock: socket.socket | None = None  # shared so send_response can use it
 
     # ---- public API --------------------------------------------------
     def drain(self) -> list[dict]:
@@ -169,6 +172,17 @@ class SensorReceiver:
             items = list(self._buffer)
             self._buffer.clear()
         return items
+
+    def send_response(self, msg: str) -> None:
+        """Send a UDP response back to the last known Arduino address."""
+        with self._lock:
+            addr = self._last_addr
+            sock = self._sock
+        if addr and sock:
+            try:
+                sock.sendto(msg.encode("utf-8"), addr)
+            except Exception as exc:
+                print(f"[SensorReceiver] send_response error: {exc}")
 
     @property
     def receiving(self) -> bool:
@@ -201,6 +215,8 @@ class SensorReceiver:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("0.0.0.0", self.port))
         sock.settimeout(1.0)  # non-blocking-ish so we can check _running
+        with self._lock:
+            self._sock = sock
         print(f"[SensorReceiver] Listening on UDP port {self.port}")
 
         while self._running:
@@ -218,6 +234,7 @@ class SensorReceiver:
                     with self._lock:
                         self._buffer.append(reading)
                         self._receiving = True
+                        self._last_addr = addr  # remember Arduino's address
                 else:
                     print(f"[SensorReceiver] Unexpected format: {msg!r}")
 
@@ -336,6 +353,30 @@ def build_dashboard():
         sizing_mode="stretch_width",
     )
 
+    # ── Risk alert banner (below sensor charts) ───────────────────
+    alert_banner = pn.pane.HTML(
+        """
+        <div style="background: rgba(255,255,255,0.04); border-radius: 10px;
+                    padding: 12px 16px; margin-top: 6px;
+                    border: 1px solid #2a2a4a; color: #888; font-size: 12px;">
+            ℹ️    &nbsp; Awaiting sensor data…
+        </div>
+        """,
+        sizing_mode="stretch_width",
+    )
+
+    # ── Fire detection banner (below camera feed) ───────────────────
+    fire_banner = pn.pane.HTML(
+        """
+        <div style="background: rgba(255,255,255,0.04); border-radius: 10px;
+                    padding: 12px 16px; margin-top: 6px;
+                    border: 1px solid #2a2a4a; color: #888; font-size: 12px;">
+            &nbsp; No fire detected
+        </div>
+        """,
+        sizing_mode="stretch_width",
+    )
+
     # ── Sidebar widgets & indicators ───────────────────────────────
     camera_status = pn.indicators.BooleanStatus(
         value=False, color="success",
@@ -361,18 +402,8 @@ def build_dashboard():
         colors=[(30, "red"), (60, "gold"), (100, "green")],
         font_size="22pt", title_size="10pt",
     )
-    # smoke / flame indicators removed — ESP32 only sends temp + humidity
 
-    detection_log = pn.pane.Markdown(
-        "_No detections yet._",
-        styles={
-            "color": "#e0e0e0",
-            "font-size": "11px",
-            "max-height": "200px",
-            "overflow-y": "auto",
-        },
-    )
-    detection_entries: list[str] = []
+    _prev_fire: list[bool] = [False]  # mutable container for closure state
 
     # ── Periodic callback: VIDEO ───────────────────────────────────
     def update_video():
@@ -382,18 +413,51 @@ def build_dashboard():
 
         # Status indicators
         camera_status.value = video_stream.connected
-        fire_status.value = video_stream.fire_detected
+        fire_now = video_stream.fire_detected
+        fire_status.value = fire_now
 
-        # Log fire detections (deduplicate by only logging transitions)
-        if video_stream.fire_detected:
-            ts = datetime.now().strftime("%H:%M:%S")
-            entry = f"**{ts}** — Fire detected! (#{video_stream.detection_count})"
-            if not detection_entries or detection_entries[-1] != entry:
-                detection_entries.append(entry)
-                # keep last 20 entries
-                if len(detection_entries) > 20:
-                    detection_entries.pop(0)
-                detection_log.object = "\n\n".join(reversed(detection_entries))
+        # Update fire banner on every tick (state-based, not transition-based)
+        if fire_now:
+            fire_banner.object = """
+            <div style="
+                background: linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%);
+                border-radius: 10px; padding: 14px 18px; margin-top: 6px;
+                border-left: 5px solid #ef4444;
+                display: flex; align-items: center; gap: 12px;
+                animation: firepulse 1.0s ease-in-out infinite;
+            ">
+                <div>
+                    <div style="color: #fca5a5; font-weight: 700; font-size: 13px;
+                                letter-spacing: 0.5px;">
+                        FIRE DETECTED
+                    </div>
+                    <div style="color: #fecaca; font-size: 11px; margin-top: 3px;">
+                        YOLO model has identified fire in the frame
+                    </div>
+                </div>
+            </div>
+            <style>
+              @keyframes firepulse {
+                0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.6); }
+                50%      { box-shadow: 0 0 0 10px rgba(239,68,68,0); }
+              }
+            </style>
+            """
+        else:
+            fire_banner.object = """
+            <div style="
+                background: rgba(20,83,45,0.5); border-radius: 10px;
+                padding: 14px 18px; margin-top: 6px;
+                border-left: 5px solid #22c55e;
+                display: flex; align-items: center; gap: 12px;
+            ">
+                <div style="color: #86efac; font-weight: 600; font-size: 13px;">
+                    No Fire Detected
+                </div>
+            </div>
+            """
+
+        _prev_fire[0] = fire_now
 
     # ── Periodic callback: SENSOR ──────────────────────────────────
     def update_sensors():
@@ -413,8 +477,60 @@ def build_dashboard():
 
         # Update numeric indicators with latest value
         latest = readings[-1]
-        temp_indicator.value = latest.get("temperature", 0)
-        hum_indicator.value  = latest.get("humidity",    0)
+        temp_val = latest.get("temperature", 0)
+        hum_val  = latest.get("humidity",    100)
+        temp_indicator.value = temp_val
+        hum_indicator.value  = hum_val
+
+        # ── Risk alert banner ─────────────────────────────────────
+        if temp_val > 35 or hum_val < 70:
+            alert_banner.object = """
+            <div style="
+                background: linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%);
+                border-radius: 10px; padding: 14px 18px; margin-top: 6px;
+                border-left: 5px solid #ef4444;
+                display: flex; align-items: center; gap: 12px;
+                animation: pulse 1.4s ease-in-out infinite;
+            ">
+                <span style="font-size: 28px;"></span>
+                <div>
+                    <div style="color: #fca5a5; font-weight: 700; font-size: 13px;
+                                letter-spacing: 0.5px;">
+                        RISK OF EARLY FOREST FIRE
+                    </div>
+                    <div style="color: #fecaca; font-size: 11px; margin-top: 3px;">
+                        High temp or low humidity detected
+                    </div>
+                </div>
+            </div>
+            <style>
+              @keyframes pulse {
+                0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.5); }
+                50%      { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
+              }
+            </style>
+            """
+        else:
+            alert_banner.object = """
+            <div style="
+                background: rgba(20,83,45,0.6); border-radius: 10px;
+                padding: 14px 18px; margin-top: 6px;
+                border-left: 5px solid #22c55e;
+                display: flex; align-items: center; gap: 12px;
+            ">
+                <span style="font-size: 24px;"></span>
+                <div style="color: #86efac; font-weight: 600; font-size: 13px;">
+                    Conditions Normal
+                </div>
+            </div>
+            """
+
+    # ── Periodic callback: FIRE ALERT ──────────────────────────────
+    # Proactively push fire state to ESP32 every 200 ms so the buzzer
+    # reacts immediately — independent of the 2-second DHT read cycle.
+    def push_fire_alert():
+        response = "2" if video_stream.fire_detected else "0"
+        sensor_receiver.send_response(response)
 
     # ── Register callbacks ─────────────────────────────────────────
     video_cb = pn.state.add_periodic_callback(
@@ -423,11 +539,15 @@ def build_dashboard():
     sensor_cb = pn.state.add_periodic_callback(
         update_sensors, period=SENSOR_CALLBACK_MS
     )
+    fire_alert_cb = pn.state.add_periodic_callback(
+        push_fire_alert, period=FIRE_ALERT_CALLBACK_MS
+    )
 
     # ── Cleanup on session destroy ─────────────────────────────────
     def cleanup(session_context):
         video_cb.stop()
         sensor_cb.stop()
+        fire_alert_cb.stop()
         video_stream.stop()
         sensor_receiver.stop()
 
@@ -436,7 +556,7 @@ def build_dashboard():
     # ── Assemble sidebar ───────────────────────────────────────────
     status_section = pn.Column(
         pn.pane.Markdown(
-            "## 📡 Connection Status",
+            "## Connection Status",
             styles={"color": "#e0e0e0"},
         ),
         pn.Row(camera_status, pn.pane.Markdown("**Camera Stream**", styles={"color": "#ccc", "margin": "0"})),
@@ -448,35 +568,27 @@ def build_dashboard():
 
     sensor_values_section = pn.Column(
         pn.pane.Markdown(
-            "## 📊 Latest Readings",
+            "## Latest Readings",
             styles={"color": "#e0e0e0"},
         ),
         pn.Row(temp_indicator, hum_indicator),
         pn.layout.Divider(),
     )
 
-    log_section = pn.Column(
-        pn.pane.Markdown(
-            "## 🔥 Detection Log",
-            styles={"color": "#e0e0e0"},
-        ),
-        detection_log,
-    )
-
     sidebar_content = pn.Column(
         status_section,
         sensor_values_section,
-        log_section,
         sizing_mode="stretch_width",
     )
 
     # ── Assemble main area ─────────────────────────────────────────
     video_card = pn.Column(
         pn.pane.Markdown(
-            "### 🎥 Live Camera Feed — YOLO Fire Detection",
+            "### Live Camera Feed — YOLO Fire Detection",
             styles={"color": "#e0e0e0", "margin-bottom": "5px"},
         ),
         image_pane,
+        fire_banner,
         styles={
             "background": "#1a1a2e",
             "border-radius": "12px",
@@ -487,10 +599,11 @@ def build_dashboard():
 
     sensor_card = pn.Column(
         pn.pane.Markdown(
-            "### 📈 Real-Time Sensor Data",
+            "### Real-Time Sensor Data",
             styles={"color": "#e0e0e0", "margin-bottom": "5px"},
         ),
         sensor_charts,
+        alert_banner,
         styles={
             "background": "#1a1a2e",
             "border-radius": "12px",
