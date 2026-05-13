@@ -483,7 +483,7 @@ def build_dashboard():
         hum_indicator.value  = hum_val
 
         # ── Risk alert banner ─────────────────────────────────────
-        if temp_val > 35 or hum_val < 70:
+        if (temp_val > 35 and hum_val < 70):
             alert_banner.object = """
             <div style="
                 background: linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%);
@@ -496,7 +496,7 @@ def build_dashboard():
                 <div>
                     <div style="color: #fca5a5; font-weight: 700; font-size: 13px;
                                 letter-spacing: 0.5px;">
-                        RISK OF EARLY FOREST FIRE
+                        RISK OF FOREST FIRE
                     </div>
                     <div style="color: #fecaca; font-size: 11px; margin-top: 3px;">
                         High temp or low humidity detected
@@ -512,17 +512,9 @@ def build_dashboard():
             """
         else:
             alert_banner.object = """
-            <div style="
-                background: rgba(20,83,45,0.6); border-radius: 10px;
-                padding: 14px 18px; margin-top: 6px;
-                border-left: 5px solid #22c55e;
-                display: flex; align-items: center; gap: 12px;
-            ">
-                <span style="font-size: 24px;"></span>
-                <div style="color: #86efac; font-weight: 600; font-size: 13px;">
-                    Conditions Normal
-                </div>
-            </div>
+            <div>
+            Sensors data            
+             </div>
             """
 
     # ── Periodic callback: FIRE ALERT ──────────────────────────────
