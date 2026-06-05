@@ -359,7 +359,7 @@ def build_dashboard():
         <div style="background: rgba(255,255,255,0.04); border-radius: 10px;
                     padding: 12px 16px; margin-top: 6px;
                     border: 1px solid #2a2a4a; color: #888; font-size: 12px;">
-            ℹ️    &nbsp; Awaiting sensor data…
+                &nbsp; Awaiting sensor data…
         </div>
         """,
         sizing_mode="stretch_width",
@@ -483,7 +483,7 @@ def build_dashboard():
         hum_indicator.value  = hum_val
 
         # ── Risk alert banner ─────────────────────────────────────
-        if (temp_val > 35 and hum_val < 70):
+        if (temp_val > 50 and hum_val < 70):
             alert_banner.object = """
             <div style="
                 background: linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%);

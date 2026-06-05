@@ -57,7 +57,6 @@ void loop() {
     Serial.println("Received: " + response);
 
     if (response == "2") {
-      Serial.println("🔥 Fire confirmed by camera — buzzing!");
       tone(buzzer, 5000, 500);
     }
   }
